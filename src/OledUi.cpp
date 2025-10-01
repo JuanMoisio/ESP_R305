@@ -1,10 +1,8 @@
-#include <Arduino.h>
 #include "OledUi.h"
 #include "Bitmaps.h"
+#include <Adafruit_GFX.h>
 
-static constexpr int XOFF   = 2;   // corrimiento horizontal si querés
-static constexpr int ICON_Y = 0;   // corrimiento vertical del ícono
-
+// --- invertir bits por byte (solo si alguna vez usas XBM LSB-first) ---
 static const uint8_t PROGMEM kBitRev[256] = {
   0x00,0x80,0x40,0xC0,0x20,0xA0,0x60,0xE0,0x10,0x90,0x50,0xD0,0x30,0xB0,0x70,0xF0,
   0x08,0x88,0x48,0xC8,0x28,0xA8,0x68,0xE8,0x18,0x98,0x58,0xD8,0x38,0xB8,0x78,0xF8,
@@ -24,145 +22,102 @@ static const uint8_t PROGMEM kBitRev[256] = {
   0x0F,0x8F,0x4F,0xCF,0x2F,0xAF,0x6F,0xEF,0x1F,0x9F,0x5F,0xDF,0x3F,0xBF,0x7F,0xFF
 };
 
-// Convierte XBM (LSB-first) a MSB-first en un buffer temporal y dibuja con drawBitmap().
-static void drawXbmAny(Adafruit_GFX& dsp, int16_t x, int16_t y,
-                       const uint8_t* xbmPROGMEM, int w, int h, uint16_t color)
-{
-  const size_t n = (size_t)w*h/8;
-  static uint8_t tmp[(64*64)/8];           // suficiente para 64x64
-  for (size_t i = 0; i < n; ++i) {
-    uint8_t b = pgm_read_byte(xbmPROGMEM + i);
-    tmp[i] = pgm_read_byte(&kBitRev[b]);   // invierte bits por byte
-  }
-  dsp.drawBitmap(x, y, tmp, w, h, color);
-}
+static constexpr int XOFF = 2; // corrimiento típico SH1106
 
 OledUi::OledUi(TwoWire& wire, int w, int h, uint8_t addr)
-: wire_(wire),
-  disp_(w, h, &wire_, -1),
-  width_(w),
-  height_(h),
-  addr_(addr)
-{}
+: wire_(wire), disp_(w, h, &wire_, -1), width_(w), height_(h), addr_(addr) {}
 
 bool OledUi::begin(int sda, int scl) {
   wire_.begin(sda, scl);
-  // para SH1106G:
-  if (!disp_.begin(addr_)) return false;  // <-- CAMBIO: sin SSD1306_SWITCHCAPVCC
-  disp_.clearDisplay();
-  disp_.display();
+  if (!disp_.begin(addr_)) return false;
+  disp_.clearDisplay(); disp_.display();
   return true;
 }
 
-void OledUi::centerText(const String& a, const String& b) {
-  disp_.clearDisplay();
+void OledUi::printCenter(const String& l1, const String& l2, int y1, int y2) {
   disp_.setTextSize(1);
   disp_.setTextColor(SH110X_WHITE);
+  int16_t x1,y; uint16_t w,h;
 
-  int16_t x1, y1; uint16_t w, h;
+  disp_.getTextBounds(l1, 0,0, &x1,&y,&w,&h);
+  disp_.setCursor((width_-int(w))/2, y1); disp_.println(l1);
 
-  disp_.getTextBounds(a, 0, 0, &x1, &y1, &w, &h);
-  int x = (width_ - (int)w) / 2;
-  disp_.setCursor(x, 2);
-  disp_.println(a);
-
-  if (b.length()) {
-    disp_.getTextBounds(b, 0, 0, &x1, &y1, &w, &h);
-    x = (width_ - (int)w) / 2;
-    disp_.setCursor(x, 14);
-    disp_.println(b);
+  if (l2.length()) {
+    disp_.getTextBounds(l2, 0,0, &x1,&y,&w,&h);
+    disp_.setCursor((width_-int(w))/2, y2); disp_.println(l2);
   }
-
-  // icono
-int bx = (width_  - FP64_W) / 2 + XOFF;
-int by = (height_ - FP64_H) / 2;
-drawXbmAny(disp_, bx, by, FP64, FP64_W, FP64_H, SH110X_WHITE);
-
-  disp_.display();
 }
 
-void OledUi::idle() {
-  centerText("Ponga su", "huella");
+void OledUi::drawXbmAny(Adafruit_GFX& dsp,int16_t x,int16_t y,
+                        const uint8_t* xbm,int w,int h,uint16_t color) {
+  const size_t n = (size_t)w*h/8;
+  static uint8_t tmp[512];            // hasta 64x64
+  for (size_t i=0;i<n;++i) {
+    uint8_t b = pgm_read_byte(xbm+i);
+    // tu bitmap ya es MSB-first (no invertimos). Si cambias a XBM: b = pgm_read_byte(&kBitRev[b]);
+    tmp[i] = b;
+  }
+  dsp.drawBitmap(x,y,tmp,w,h,color);
 }
 
-void OledUi::scanning() {
+void OledUi::drawFingerprint(bool on) {
+  // borrar zona del icono
+  disp_.fillRect(0, 28, width_, height_-28, SH110X_BLACK);
+  if (on) drawXbmAny(disp_, fpX_, fpY_, FP64, FP64_W, FP64_H, 1);
+}
+
+void OledUi::showIdle() {
   disp_.clearDisplay();
-  disp_.setTextSize(1);
-  disp_.setTextColor(SH110X_WHITE);
-
-  // Títulos centrados
-  int16_t x1, y1; uint16_t w, h;
-  String a = "Ponga su", b = "huella";
-  disp_.getTextBounds(a, 0,0, &x1,&y1,&w,&h);
-  int x = (width_ - (int)w) / 2;
-  disp_.setCursor(x, 2);
-  disp_.println(a);
-
-  disp_.getTextBounds(b, 0,0, &x1,&y1,&w,&h);
-  x = (width_ - (int)w) / 2;
-  disp_.setCursor(x, 14);
-  disp_.println(b);
-
-  // Ícono de huella 64x64 centrado
-  int bx = (width_  - FP64_W) / 2 + 2;      // XOFF = 2
-  int by = (height_ - FP64_H) / 2;
-  drawXbmAny(disp_, bx, by, FP64, FP64_W, FP64_H, SH110X_WHITE);
-
+  printCenter("Ponga su", "huella", 2, 14);
+  fpX_ = (width_-FP64_W)/2 + XOFF;
+  fpY_ = (height_-FP64_H)/2;
+  drawFingerprint(true);
   disp_.display();
 }
 
-
-void OledUi::ok(const String& msg) {
+void OledUi::startScanning() {
   disp_.clearDisplay();
-  disp_.setTextSize(2);
-  disp_.setTextColor(SH110X_WHITE);
-  disp_.setCursor( (width_ - 2*6*2) / 2, 0 ); // “OK” centrado (aprox)
-  disp_.println("OK");
-
-  disp_.setTextSize(1);
-  disp_.setCursor(0, 18);
-  disp_.println(msg.length() ? msg : "Lectura correcta");
-int bx = (width_  - FP64_W) / 2 + XOFF;
-int by = (height_ - FP64_H) / 2;
-drawXbmAny(disp_, bx, by, FP64, FP64_W, FP64_H, SH110X_WHITE);
-
+  printCenter("Escaneando", "mantener...", 2, 14);
+  fpX_ = (width_-FP64_W)/2 + XOFF;
+  fpY_ = (height_-FP64_H)/2;
+  blinkOn_ = true;
+  lastBlink_ = 0;        // fuerza primer dibujado
+  drawFingerprint(true);
   disp_.display();
 }
 
-void OledUi::error(const String& msg) {
+void OledUi::tick() {
+  // llamalo siempre desde loop(); parpadea cada 200 ms si estás en scanning
+  if (millis() - lastBlink_ >= 200) {
+    lastBlink_ = millis();
+    blinkOn_ = !blinkOn_;
+    drawFingerprint(blinkOn_);
+    disp_.display();
+  }
+}
+
+void OledUi::showOk(const String& msg) {
   disp_.clearDisplay();
   disp_.setTextSize(2);
   disp_.setTextColor(SH110X_WHITE);
-  disp_.setCursor( (width_ - 6*5) / 2, 0 ); // “ERROR” aprox al centro
-  disp_.println("ERROR");
-
+  disp_.setCursor((width_-2*6*2)/2, 0); disp_.println("OK");
   disp_.setTextSize(1);
-  disp_.setCursor(0, 18);
-  disp_.println(msg);
-
-int bx = (width_  - FP64_W) / 2 + XOFF;
-int by = (height_ - FP64_H) / 2;
-drawXbmAny(disp_, bx, by, FP64, FP64_W, FP64_H, SH110X_WHITE);
+  disp_.setCursor(0, 18); disp_.println(msg);
+  fpX_ = (width_-FP64_W)/2 + XOFF;
+  fpY_ = (height_-FP64_H)/2;
+  drawFingerprint(true);
   disp_.display();
 }
 
-void OledUi::enrollStep(uint8_t n) {
+void OledUi::showError(const String& msg) {
   disp_.clearDisplay();
-  disp_.setTextSize(1);
-  disp_.setTextColor(SH110X_WHITE);
-  disp_.setCursor(0, 0);
-  disp_.println("Enrolamiento");
   disp_.setTextSize(2);
-  disp_.setCursor( (width_ - 6*6) / 2, 12); // “Toma N”
-  disp_.print("Toma ");
-  disp_.println(n);
+  disp_.setTextColor(SH110X_WHITE);
+  disp_.setCursor((width_-6*5)/2, 0); disp_.println("ERROR");
   disp_.setTextSize(1);
-  disp_.setCursor(0, 32);
-  disp_.println(n==1 ? "Apoye y mantenga" : "Mismo dedo, leve giro");
-
-int bx = (width_  - FP64_W) / 2 + XOFF;
-int by = (height_ - FP64_H) / 2;
-drawXbmAny(disp_, bx, by, FP64, FP64_W, FP64_H, SH110X_WHITE);
-
+  disp_.setCursor(0, 18); disp_.println(msg);
+  fpX_ = (width_-FP64_W)/2 + XOFF;
+  fpY_ = (height_-FP64_H)/2;
+  drawFingerprint(true);
   disp_.display();
 }

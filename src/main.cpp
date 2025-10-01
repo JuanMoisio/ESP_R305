@@ -4,24 +4,13 @@
 //               RX R305 <- GPIO26 (TX ESP32)
 // OLED I2C: SDA=21, SCL=22, addr 0x3C (SH1106 1.3")
 // Serie: 115200
-//
-// Comandos por Serial:
-//   e <id>    -> Enrolar ID (0..999). Al terminar pide nombre y lo guarda.
-//   s         -> Match 1:N (manual). En modo “espera”, ya busca solo.
-//   d <id>    -> Borrar ID
-//   c         -> Contar plantillas
-//   x         -> Vaciar base
-//   i         -> Info ReadSysPara
-//   n <id> <nombre...> -> Setear/Actualizar nombre manualmente
-//
-// Estado por defecto: “Esperando huella” con animación. Si hay match: Bienvenido <nombre>.
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <HardwareSerial.h>
 #include <Preferences.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SH110X.h>                 // Si tu OLED fuese SSD1306, cambiar por Adafruit_SSD1306.h
+#include <Adafruit_SH110X.h>
 #include <Adafruit_Fingerprint.h>
 
 // ====== Config pines ======
@@ -44,17 +33,8 @@ Preferences prefs; // namespace: "users", key: "id%03u"
 // --- Offset típico en SH1106 (ajustalo si ves el dibujo corrido) ---
 static const int XOFF = 2;   // probá 0, 2 o 4 según tu módulo
 
-// Huella 32x32 (formato compatible con drawBitmap: L->R, top->bottom, 1 bit por pixel)
-const uint8_t PROGMEM FP_32x32[] = {
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x03,0xE0,0x07,0xF0,0x0F,0xF8,0x1C,0x1C,
-  0x18,0x0E,0x38,0x07,0x30,0x07,0x70,0x03,
-  0x71,0xC3,0x73,0xE3,0x77,0xF3,0x76,0x33,
-  0x76,0x13,0x76,0x13,0x76,0x33,0x77,0xF3,
-  0x73,0xE3,0x71,0xC3,0x70,0x03,0x30,0x07,
-  0x38,0x07,0x18,0x0E,0x1C,0x1C,0x0F,0xF8,
-  0x07,0xF0,0x03,0xE0,0x00,0x00,0x00,0x00
-};
+// Huella 32x32 (1bpp, MSB-first) — ideal cuando también mostramos texto
+
 
 // ====== Utils ======
 const char* fp_err(uint8_t code) {
@@ -101,51 +81,43 @@ void setName(uint16_t id, const String& name) {
 }
 
 // ====== OLED: helpers ======
-void oled_clear() { display.clearDisplay(); }
-void oled_show()  { display.display(); }
+inline void oled_clear() { display.clearDisplay(); }
+inline void oled_show()  { display.display(); }
+
+// Dibuja huella 32x32 centrada abajo del texto
+static inline void draw_fp32_centered(int y = 30) {
+  int x = ((SCREEN_WIDTH - 32) / 2) + XOFF;
+  display.drawBitmap(x, y, FP_32x32, 32, 32, 1);
+}
 
 void oled_center(const String& l1, const String& l2="") {
   oled_clear();
   display.setTextColor(SH110X_WHITE);
   display.setTextSize(1);
+
   int16_t x1,y1; uint16_t w,h;
   display.getTextBounds(l1, 0,0,&x1,&y1,&w,&h);
   int x = (SCREEN_WIDTH - w)/2;
   display.setCursor(x, 6);
   display.println(l1);
+
   if (l2.length()) {
     display.getTextBounds(l2, 0,0,&x1,&y1,&w,&h);
     x = (SCREEN_WIDTH - w)/2;
     display.setCursor(x, 6+14);
     display.println(l2);
   }
-  display.drawBitmap(((SCREEN_WIDTH-32)/2) + XOFF, 32, FP_32x32, 32, 32, 1);
+
+  draw_fp32_centered(30);
   oled_show();
 }
 
-// Spinner (12 segmentos)
-uint8_t spinnerStep = 0;
-unsigned long lastAnim = 0;
-void oled_spinnerFrame() {
-  const int cx = SCREEN_WIDTH/2, cy = 44; // centro debajo del texto
-  const int r1 = 12, r2 = 18;
-  // limpio zona spinner
+// Blink simple de la huella mientras captura (sin usar spinner)
+static void oled_scanBlinkTick(bool on) {
+  // Borro zona del icono y redibujo según 'on'
   display.fillRect(0, 28, SCREEN_WIDTH, 36, SH110X_BLACK);
-  // huella
-  display.drawBitmap((SCREEN_WIDTH-32)/2, 30, FP_32x32, 32, 32, 1);
-  // 12 rayitas
-  for (int i=0; i<12; ++i) {
-    int on = (i == spinnerStep) ? 1 : 0;
-    float a = (i * 30) * (PI/180.0);
-    int x1 = cx + int(r1*cos(a));
-    int y1 = cy + int(r1*sin(a));
-    int x2 = cx + int(r2*cos(a));
-    int y2 = cy + int(r2*sin(a));
-    if (on) display.drawLine(x1,y1,x2,y2, SH110X_WHITE);
-    else    display.drawPixel(x2,y2, SH110X_WHITE);
-  }
+  if (on) draw_fp32_centered(30);
   oled_show();
-  spinnerStep = (spinnerStep + 1) % 12;
 }
 
 // Pantallas de estado
@@ -158,7 +130,7 @@ void oled_ok_msg(const String& l2="Lectura correcta") {
   display.setCursor(26, 4); display.println("OK");
   display.setTextSize(1);
   display.setCursor(0, 24); display.println(l2);
-  display.drawBitmap(((SCREEN_WIDTH-32)/2) + XOFF, 32, FP_32x32, 32, 32, 1);
+  draw_fp32_centered(30);
   oled_show();
 }
 void oled_error(const String& msg) {
@@ -168,7 +140,7 @@ void oled_error(const String& msg) {
   display.setCursor(6, 4); display.println("ERROR");
   display.setTextSize(1);
   display.setCursor(0, 24); display.println(msg);
-  display.drawBitmap(((SCREEN_WIDTH-32)/2) + XOFF, 32, FP_32x32, 32, 32, 1);
+  draw_fp32_centered(30);
   oled_show();
 }
 void oled_bienvenido(const String& nombre, uint16_t id, int score) {
@@ -178,8 +150,8 @@ void oled_bienvenido(const String& nombre, uint16_t id, int score) {
   display.setCursor(0, 0);  display.println("Acceso concedido");
   display.setTextSize(2);
   display.setCursor(0, 16);
-  if (nombre.length()) { display.println("Bienvenido"); }
-  else                 { display.println("ID OK"); }
+  if (nombre.length()) display.println("Bienvenido");
+  else                 display.println("ID OK");
   display.setTextSize(1);
   display.setCursor(0, 36);
   if (nombre.length()) {
@@ -195,31 +167,48 @@ void oled_bienvenido(const String& nombre, uint16_t id, int score) {
 }
 
 // ====== Sensor helpers ======
+// Captura a buffer con BLINK de huella durante el loop de espera
 bool captureToBuffer(uint8_t buf) {
   // esperar dedo fuera
   unsigned long t0=millis();
-  while (finger.getImage()!=FINGERPRINT_NOFINGER && millis()-t0<1500) delay(50);
+  while (finger.getImage()!=FINGERPRINT_NOFINGER && millis()-t0<1500) delay(40);
 
-  // pedir dedo
+  // pedir dedo con blink
   unsigned long t1 = millis();
+  bool blink = false, lastBlink = false;
+  unsigned long lastToggle = 0;
+
   while (true) {
+    // toggle ~cada 180 ms
+    unsigned long now = millis();
+    if (now - lastToggle > 180) {
+      lastToggle = now;
+      blink = !blink;
+      oled_scanBlinkTick(blink);
+    }
+
     uint8_t rc = finger.getImage();
-    if (rc == FINGERPRINT_OK) break;
-    if (rc == FINGERPRINT_NOFINGER) {
-      // nada
-    } else if (rc == FINGERPRINT_IMAGEFAIL || rc == FINGERPRINT_IMAGEMESS) {
-      // opcional: mensaje breve
+    if (rc == FINGERPRINT_OK) {
+      // dejar la huella encendida antes de seguir
+      if (!lastBlink) { oled_scanBlinkTick(true); lastBlink=true; }
+      break;
+    }
+    if (rc != FINGERPRINT_NOFINGER) {
+      // ruido: seguimos intentando
     }
     if (millis() - t1 > 15000) { oled_error("Tiempo agotado"); return false; }
-    delay(50);
+    delay(20);
   }
 
   uint8_t rc = finger.image2Tz(buf);
-  if (rc != FINGERPRINT_OK) { oled_error(String("image2Tz: ")+fp_err(rc)); return false; }
+  if (rc != FINGERPRINT_OK) {
+    oled_error(String("image2Tz: ")+fp_err(rc));
+    return false;
+  }
 
-  // retirar
+  // retirar dedo (sin blink)
   unsigned long t2=millis();
-  while (finger.getImage()!=FINGERPRINT_NOFINGER && millis()-t2<1500) delay(50);
+  while (finger.getImage()!=FINGERPRINT_NOFINGER && millis()-t2<1500) delay(40);
   return true;
 }
 
@@ -229,7 +218,7 @@ bool enroll(uint16_t id) {
   oled_scanning();
   if (!captureToBuffer(1)) { Serial.println("Falló captura(1)"); return false; }
 
-  delay(800);
+  delay(500);
   Serial.println(F("[ENROLL] Toma 2/2"));
   oled_scanning();
   if (!captureToBuffer(2)) { Serial.println("Falló captura(2)"); return false; }
@@ -273,7 +262,7 @@ void autoDetectBaud() {
   detectedBaud=0;
 }
 
-// ====== Loop de espera con animación + auto-match ======
+// ====== Loop de espera con auto-match ======
 unsigned long lastAutoMatch = 0;
 const unsigned long autoMatchEveryMs = 800; // cada ~0.8s intenta
 
@@ -281,12 +270,9 @@ void idleWithAnimationAndAutoMatch() {
   static bool first = true;
   if (first) { oled_idle(); first=false; }
 
-  unsigned long now = millis();
-  //if (now - lastAnim > 80) { // refresco anim
-  //  lastAnim = now;
-  //  oled_spinnerFrame();
- // }
+  // (spinner desactivado)
 
+  unsigned long now = millis();
   if (now - lastAutoMatch > autoMatchEveryMs) {
     lastAutoMatch = now;
     if (finger.getImage() == FINGERPRINT_NOFINGER) return; // nada que hacer
@@ -299,7 +285,6 @@ void idleWithAnimationAndAutoMatch() {
       delay(1700);
       oled_idle();
     } else {
-      // sin coincidencia visual corto
       oled_error("Sin coincidencia");
       delay(900);
       oled_idle();
@@ -373,7 +358,6 @@ void handleSerialCommand(const String& line) {
     uint16_t id = line.substring(2).toInt();
     Serial.print("Enrolando ID "); Serial.println(id);
     if (enroll(id)) {
-      // pedir nombre
       Serial.print("Ingresá nombre para ID "); Serial.print(id); Serial.println(": ");
       String name = readLineWithTimeout(30000);
       if (name.length()) { setName(id, name); Serial.println("Nombre guardado."); }
@@ -423,14 +407,8 @@ void setup() {
   printHelp();
 }
 
-
-enum UiState { UI_IDLE, UI_SCANNING, UI_SHOW };
-static UiState uiState = UI_IDLE;
-static uint32_t uiLast = 0;
-static int uiAng = 0;
-
 void loop() {
-  // Animación + auto-match en espera
+  // Espera + auto-match
   idleWithAnimationAndAutoMatch();
 
   // CLI por Serial (no bloqueante)
@@ -439,5 +417,3 @@ void loop() {
     if (line.length()) handleSerialCommand(line);
   }
 }
-
-//3666320
