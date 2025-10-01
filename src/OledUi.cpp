@@ -69,9 +69,11 @@ void OledUi::drawFingerprint(bool on) {
 void OledUi::showIdle() {
   disp_.clearDisplay();
   printCenter("Ponga su", "huella", 2, 14);
-  fpX_ = (width_-FP64_W)/2 + XOFF;
-  fpY_ = (height_-FP64_H)/2;
-  drawFingerprint(true);
+  disp_.clearDisplay();
+int x = (128 - FP64_W) / 2;
+int y = (64  - FP64_H) / 2;
+disp_.drawBitmap(x, y, FP64, FP64_W, FP64_H, 1);
+disp_.display();
   disp_.display();
 }
 

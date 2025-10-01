@@ -1,8 +1,17 @@
 #pragma once
-#include <Arduino.h>
+#include <stdint.h>
 
-// Bitmap de huella 64x64 (MSB-first, apto para Adafruit_GFX::drawBitmap)
-extern const uint8_t FP64[] PROGMEM;
+// Bitmap 64x64 (1bpp)
+extern const uint8_t FP_64x64[];
 
-inline constexpr int FP64_W = 64;
-inline constexpr int FP64_H = 64;
+constexpr int FP64_W = 64;
+constexpr int FP64_H = 64;
+
+// Alias de compatibilidad con código viejo:
+#define FP64 FP_64x64
+
+// Si tu bitmap fuente está en XBM/MSB-first, poné 1.
+// Si está en LSB-first (típico "drawBitmap"), poné 0.
+#ifndef FP_BITMAP_IS_XBM
+#define FP_BITMAP_IS_XBM 0
+#endif
