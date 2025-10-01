@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Panel Huella (ESP32 + R305)</title>
+<style>
+  :root { font-family: system-ui, Segoe UI, Roboto, Arial; }
+  body { margin: 16px; background:#0b1320; color:#e6eefc; }
+  h1 { margin: 0 0 12px 0; font-size: 20px; }
+  .card { background:#121c2f; border:1px solid #1f2b46; border-radius:12px; padding:16px; margin-bottom:12px; }
+  label { font-size:13px; opacity:.9; margin-right:6px; }
+  input, button { font-size:14px; }
+  input[type="text"], input[type="number"] {
+    background:#0e182b; color:#e6eefc; border:1px solid #233150; border-radius:8px;
+    padding:8px 10px; outline:none; width:220px;
+  }
+  button {
+    background:#2b6ef6; color:#fff; border:none; border-radius:10px; padding:8px 12px; cursor:pointer;
+    margin:4px 4px 4px 0;
+  }
+  button.secondary { background:#21365d; }
+  button.danger { background:#d43d3d; }
+  button:disabled { opacity:.6; cursor:not-allowed; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .muted { color:#a8b7d6; font-size:12px; }
+  pre {
+    white-space:pre-wrap; word-break:break-word; background:#0e182b; color:#d7e5ff;
+    border:1px solid #233150; border-radius:10px; padding:12px; margin:0; max-height:55vh; overflow:auto;
+  }
+  .pill { font-size:12px; padding:2px 8px; border-radius:999px; background:#21365d; display:inline-block; margin-left:8px; }
+  .ok { background:#1e8346; }
+  .err { background:#7a2430; }
+</style>
+</head>
+<body>
+  <h1>Panel Huella (ESP32 + R305) <span id="statusPill" class="pill">sin probar</span></h1>
+
+  <div class="card">
+    <div class="row">
+      <label for="baseUrl">URL base del ESP32:</label>
+      <input id="baseUrl" type="text" placeholder="http://192.168.x.y" />
+      <button id="btnProbar" class="secondary">Probar conexión</button>
+    </div>
+    <div class="muted" style="margin-top:6px">
+      Tip: suele ser <code>http://</code> + IP que viste por Serial (puerto 80). Ej: <code>http://192.168.1.34</code>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom:6px">
+      <button id="btnStatus">Estado</button>
+      <button id="btnInfo" class="secondary">Info sensor</button>
+      <button id="btnCount" class="secondary">Conteo</button>
+    </div>
+    <div class="row" style="margin-bottom:6px">
+      <input id="enrollId" type="number" min="0" max="999" placeholder="ID a enrolar" />
+      <button id="btnEnroll">Enrolar ID</button>
+    </div>
+    <div class="row" style="margin-bottom:6px">
+      <button id="btnMatch">Match 1:N</button>
+    </div>
+    <div class="row" style="margin-bottom:6px">
+      <input id="deleteId" type="number" min="0" max="999" placeholder="ID a borrar" />
+      <button id="btnDelete" class="danger">Borrar ID</button>
+      <button id="btnEmpty" class="danger">Vaciar base</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div class="muted">Respuesta</div>
+      <div>
+        <button id="btnClear" class="secondary">Limpiar</button>
+      </div>
+    </div>
+    <pre id="out"></pre>
+  </div>
+
+<script>
+const $ = sel => document.querySelector(sel);
+const out = $("#out");
+const pill = $("#statusPill");
+
+function log(obj, label = "") {
+  const ts = new Date().toLocaleTimeString();
+  let head = label ? `# ${label} @ ${ts}\n` : `# ${ts}\n`;
+  out.textContent = head + (typeof obj === "string" ? obj : JSON.stringify(obj, null, 2)) + "\n\n" + out.textContent;
+}
+
+function base() {
+  const v = $("#baseUrl").value.trim().replace(/\/+$/,'');
+  if (!v) throw new Error("Ingresá la URL base (ej: http://192.168.1.34)");
+  return v;
+}
+
+async function call(method, path) {
+  const url = base() + path;
+  const res = await fetch(url, { method, headers: { "Content-Type":"application/json" } });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = text; }
+  return { ok: res.ok, status: res.status, data };
+}
+
+function setPill(ok, text) {
+  pill.textContent = text || (ok ? "OK" : "error");
+  pill.classList.remove("ok","err");
+  pill.classList.add(ok ? "ok" : "err");
+}
+
+$("#btnProbar").onclick = async () => {
+  try {
+    setPill(false, "probando...");
+    const r = await call("GET", "/api/status");
+    setPill(r.ok, r.ok ? "conectado" : "error");
+    log(r.data, "STATUS");
+  } catch (e) {
+    setPill(false, "error");
+    log(String(e), "ERROR PROBAR");
+  }
+};
+
+$("#btnStatus").onclick = async () => {
+  try { log((await call("GET","/api/status")).data, "STATUS"); }
+  catch(e){ log(String(e), "ERROR STATUS"); }
+};
+
+$("#btnInfo").onclick = async () => {
+  try { log((await call("GET","/api/info")).data, "INFO"); }
+  catch(e){ log(String(e), "ERROR INFO"); }
+};
+
+$("#btnCount").onclick = async () => {
+  try { log((await call("GET","/api/count")).data, "COUNT"); }
+  catch(e){ log(String(e), "ERROR COUNT"); }
+};
+
+$("#btnEnroll").onclick = async () => {
+  const id = parseInt($("#enrollId").value, 10);
+  if (isNaN(id)) { alert("Ingresá un ID para enrolar"); return; }
+  try {
+    log("Enrolando... seguí las indicaciones en la OLED", "ENROLL");
+    const r = await call("POST", "/api/enroll?id=" + encodeURIComponent(id));
+    log(r.data, "ENROLL RESP");
+  } catch(e){ log(String(e), "ERROR ENROLL"); }
+};
+
+$("#btnMatch").onclick = async () => {
+  try {
+    log("Apoyá el dedo en el sensor...", "MATCH");
+    const r = await call("POST", "/api/match");
+    log(r.data, "MATCH RESP");
+  } catch(e){ log(String(e), "ERROR MATCH"); }
+};
+
+$("#btnDelete").onclick = async () => {
+  const id = parseInt($("#deleteId").value, 10);
+  if (isNaN(id)) { alert("Ingresá un ID para borrar"); return; }
+  if (!confirm("¿Borrar ID " + id + "?")) return;
+  try {
+    const r = await call("DELETE", "/api/id?id=" + encodeURIComponent(id));
+    log(r.data, "DELETE RESP");
+  } catch(e){ log(String(e), "ERROR DELETE"); }
+};
+
+$("#btnEmpty").onclick = async () => {
+  if (!confirm("¿Vaciar TODA la base del R305?")) return;
+  try {
+    const r = await call("POST", "/api/empty");
+    log(r.data, "EMPTY RESP");
+  } catch(e){ log(String(e), "ERROR EMPTY"); }
+};
+
+$("#btnClear").onclick = () => { out.textContent = ""; };
+
+// Ayuda: si abrís el HTML desde el ESP32 (sirviéndolo ahí) podríamos autocompletar,
+// pero como es archivo local, sólo guardamos último host en localStorage:
+(function restoreBase(){
+  const key = "fp_base_url";
+  const saved = localStorage.getItem(key);
+  if (saved) $("#baseUrl").value = saved;
+  $("#baseUrl").addEventListener("change", () => localStorage.setItem(key, $("#baseUrl").value.trim()));
+})();
+</script>
+</body>
+</html>

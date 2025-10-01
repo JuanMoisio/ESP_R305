@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"name": "HuellaDactilar",
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"string_view": "cpp",
+			"regex": "cpp"
+		}
+	}
+}
