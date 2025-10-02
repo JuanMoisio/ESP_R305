@@ -7,6 +7,9 @@ class DisplayModel {
 public:
   static constexpr int SCREEN_W = 128;
   static constexpr int SCREEN_H = 64;
+  void setScanningActive(bool on) { _scanningActive = on; }
+  bool isScanningActive() const { return _scanningActive; }
+
 
   explicit DisplayModel(TwoWire *wire, int xoffset = 2);
 
@@ -24,6 +27,7 @@ private:
   void show();
   void leftTwoLines(const String& l1, const String& l2);
   void drawFp64Right();
+   bool _scanningActive = false;
 
   Adafruit_SH1106G _display;
   int _xoff;

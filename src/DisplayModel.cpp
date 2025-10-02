@@ -46,7 +46,7 @@ void DisplayModel::leftTwoLines(const String& l1, const String& l2) {
 }
 
 void DisplayModel::idle()     { leftTwoLines("Ponga su", "huella"); }
-void DisplayModel::scanning() { leftTwoLines("Escaneando", "mantener..."); }
+void DisplayModel::scanning() { leftTwoLines("Escaneando", "mantener..."); _scanningActive = true;}
 
 void DisplayModel::okMsg(const String& l2) {
   clear();
@@ -57,6 +57,7 @@ void DisplayModel::okMsg(const String& l2) {
   _display.setCursor(0, 28); _display.println(l2);
   drawFp64Right();
   show();
+  _scanningActive = false;
 }
 
 void DisplayModel::errorMsg(const String& msg) {
@@ -68,6 +69,7 @@ void DisplayModel::errorMsg(const String& msg) {
   _display.setCursor(0, 28); _display.println(msg);
   drawFp64Right();
   show();
+  _scanningActive = false;
 }
 
 void DisplayModel::welcome(const String& nombre, uint16_t id, int score) {
@@ -93,10 +95,23 @@ void DisplayModel::welcome(const String& nombre, uint16_t id, int score) {
 
   drawFp64Right();
   show();
+  _scanningActive = false;
 }
 
 void DisplayModel::scanBlinkTick(bool on) {
-  _display.fillRect(64, 0, 64, 64, SH110X_BLACK);
-  if (on) drawFp64Right();
-  show();
+  const int x = 64 + _xoff;
+  const int y = 0;
+
+  // Apagar exactamente el área del ícono
+  _display.fillRect(x, y, FP64_W, FP64_H, SH110X_BLACK);
+
+  // Encender si corresponde
+#if FP_BITMAP_IS_XBM
+  if (on) _display.drawXBitmap(x, y, FP_64x64, FP64_W, FP64_H, 1);
+#else
+  if (on) _display.drawBitmap (x, y, FP_64x64, FP64_W, FP64_H, 1);
+#endif
+
+  _display.display();
 }
+

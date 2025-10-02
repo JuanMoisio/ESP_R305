@@ -52,55 +52,140 @@ static String readLineWithTimeout(uint32_t ms) {
 unsigned long lastAutoMatch = 0;
 const unsigned long autoMatchEveryMs = 800; // ~0.8s
 
-static void idleWithAnimationAndAutoMatch() {
-  static bool first = true;
-  if (first) { displayModel.idle(); first=false; }
+// ====== Loop de espera con auto-match (FSM no bloqueante con blink) ======
+// ====== Estado de automatch sin throttling ======
+// ====== Automatch con blink + retención mínima ======
+// ===== Blink asimétrico (más lento) =====
+static bool blinkOn = false;
+static unsigned long nextBlinkAt = 0;
+static const unsigned long BLINK_ON_MS  = 700;  // encendido más tiempo
+static const unsigned long BLINK_OFF_MS = 500;  // apagado más corto
 
+// Timers/estado (si no los tenés ya)
+enum class AutoState { WAIT_FINGER, MATCHING, COOLDOWN };
+static AutoState autoState = AutoState::WAIT_FINGER;
+static unsigned long cooldownUntil = 0;
+static unsigned long scanStart = 0;
+static const unsigned long MIN_SCAN_MS = 4000;    // tu valor preferido
+static unsigned long matchingDeadline = 0;
+
+static bool resultReady = false;
+static bool resultOk = false;
+static int  resultId = -1;
+static int  resultScore = 0;
+static unsigned long showResultAt = 0;
+
+void idleWithAnimationAndAutoMatch() {
   unsigned long now = millis();
-  if (now - lastAutoMatch > autoMatchEveryMs) {
-    lastAutoMatch = now;
 
-    // Evitá bloquear si no hay dedo
-    if (fpModel.chip().getImage() == FINGERPRINT_NOFINGER) return;
+  switch (autoState) {
+    case AutoState::WAIT_FINGER: {
+      displayModel.idle();
 
-    auto blinkCb = [](bool on){ displayModel.scanBlinkTick(on); };
-    MatchRes m = fpModel.fastMatch(blinkCb);
-    if (m.ok) {
-      String name = names.get(m.id);
-      displayModel.welcome(name, m.id, m.score);
-      Serial.print(F("Match OK -> ID=")); Serial.print(m.id);
-      Serial.print(F(" score=")); Serial.println(m.score);
-      delay(1700);
-      displayModel.idle();
-    } else {
-      displayModel.errorMsg("Sin coincidencia");
-      delay(900);
-      displayModel.idle();
+      if (fpModel.chip().getImage() != FINGERPRINT_NOFINGER) {
+        displayModel.scanning();
+        blinkOn = true;
+        displayModel.scanBlinkTick(true);
+        nextBlinkAt = now + BLINK_ON_MS;   // ⬅️ primer vencimiento (ON)
+
+        scanStart = now;
+        matchingDeadline = now + 15000;
+        resultReady = false;
+
+        autoState = AutoState::MATCHING;
+      }
+      break;
+    }
+
+    case AutoState::MATCHING: {
+      // Blink asimétrico por tiempo
+      if ((long)(now - nextBlinkAt) >= 0) {
+        blinkOn = !blinkOn;
+        displayModel.scanBlinkTick(blinkOn);
+        nextBlinkAt = now + (blinkOn ? BLINK_ON_MS : BLINK_OFF_MS);
+      }
+
+      // ¿ya hay resultado y pasó el mínimo de animación?
+      if (resultReady) {
+        if ((long)(now - showResultAt) >= 0) {
+          blinkOn = false;
+          if (resultOk) {
+            String name = names.get(resultId);
+            displayModel.welcome(name, resultId, resultScore);
+          } else {
+            displayModel.errorMsg("Sin coincidencia");
+          }
+          cooldownUntil = now + 1500;
+          autoState = AutoState::COOLDOWN;
+        }
+        break;
+      }
+
+      // Timeout de seguridad
+      if ((long)(now - matchingDeadline) >= 0) {
+        blinkOn = false;
+        displayModel.errorMsg("Tiempo agotado");
+        cooldownUntil = now + 1200;
+        autoState = AutoState::COOLDOWN;
+        break;
+      }
+
+      // Captura NO bloqueante
+      uint8_t gi = fpModel.chip().getImage();
+      if (gi != FINGERPRINT_OK) break;
+
+      // Convertir y buscar (una vez)
+      if (fpModel.chip().image2Tz(1) != FINGERPRINT_OK) {
+        resultOk = false; resultId = -1; resultScore = 0;
+        resultReady = true;
+        showResultAt = max(now, scanStart + MIN_SCAN_MS);
+        break;
+      }
+
+      bool ok = (fpModel.chip().fingerFastSearch() == FINGERPRINT_OK);
+      resultOk    = ok;
+      resultId    = ok ? fpModel.chip().fingerID    : -1;
+      resultScore = ok ? fpModel.chip().confidence : 0;
+      resultReady = true;
+      showResultAt = max(now, scanStart + MIN_SCAN_MS);
+      break;
+    }
+
+    case AutoState::COOLDOWN: {
+      if ((long)(now - cooldownUntil) >= 0) {
+        autoState = AutoState::WAIT_FINGER;
+      }
+      break;
     }
   }
 }
 
+
 // ====== Comandos por Serial ======
 static void handleSerialCommand(const String& line) {
   if (line=="s") {
-    Serial.println(F("Apoyá el dedo..."));
-    auto blinkCb = [](bool on){ displayModel.scanBlinkTick(on); };
-    MatchRes m = fpModel.fastMatch(blinkCb);
-    if (m.ok) {
-      String name = names.get(m.id);
-      displayModel.welcome(name, m.id, m.score);
-      Serial.print(F("Match ID=")); Serial.print(m.id);
-      Serial.print(F(" score=")); Serial.println(m.score);
-      delay(1500);
-      displayModel.idle();
-    } else {
-      displayModel.errorMsg("Sin coincidencia");
-      Serial.println(F("No se encontró match"));
-      delay(900);
-      displayModel.idle();
-    }
-    return;
+  Serial.println(F("Apoyá el dedo..."));
+
+  // 👇 NUEVO
+  displayModel.scanning();
+
+  auto blinkCb = [](bool on){ displayModel.scanBlinkTick(on); };
+  MatchRes m = fpModel.fastMatch(blinkCb);
+  if (m.ok) {
+    String name = names.get(m.id);
+    displayModel.welcome(name, m.id, m.score);
+    Serial.print(F("Match ID=")); Serial.print(m.id);
+    Serial.print(F(" score=")); Serial.println(m.score);
+    delay(1500);
+    displayModel.idle();
+  } else {
+    displayModel.errorMsg("Sin coincidencia");
+    Serial.println(F("No se encontró match"));
+    delay(900);
+    displayModel.idle();
   }
+  return;
+}
 
   if (line=="c") {
     if (fpModel.chip().getTemplateCount()==FINGERPRINT_OK)
@@ -142,23 +227,26 @@ static void handleSerialCommand(const String& line) {
   }
 
   if (line.startsWith("e ")) {
-    uint16_t id = line.substring(2).toInt();
-    Serial.print("Enrolando ID "); Serial.println(id);
-    auto blinkCb = [](bool on){ displayModel.scanBlinkTick(on); };
-    if (fpModel.enroll(id, blinkCb)) {
-      Serial.print("Ingresá nombre para ID "); Serial.print(id); Serial.println(": ");
-      String name = readLineWithTimeout(30000);
-      if (name.length()) { names.set(id, name); Serial.println("Nombre guardado."); }
-      else Serial.println("Sin nombre (timeout).");
-      displayModel.okMsg(String("ID ")+id);
-    } else {
-      displayModel.errorMsg("Enrolamiento falló");
-      Serial.println("Enrolamiento falló.");
-    }
-    displayModel.idle();
-    return;
-  }
+  uint16_t id = line.substring(2).toInt();
+  Serial.print("Enrolando ID "); Serial.println(id);
 
+  // 👇 NUEVO: leyenda antes de la 1ª captura
+  displayModel.scanning();
+  auto blinkCb = [](bool on){ displayModel.scanBlinkTick(on); };
+
+  if (fpModel.enroll(id, blinkCb)) {
+    Serial.print("Ingresá nombre para ID "); Serial.print(id); Serial.println(": ");
+    String name = readLineWithTimeout(30000);
+    if (name.length()) { names.set(id, name); Serial.println("Nombre guardado."); }
+    else Serial.println("Sin nombre (timeout).");
+    displayModel.okMsg(String("ID ")+id);
+  } else {
+    displayModel.errorMsg("Enrolamiento falló");
+    Serial.println("Enrolamiento falló.");
+  }
+  displayModel.idle();
+  return;
+}
   Serial.println("Comando no reconocido.");
   printHelp();
 }
@@ -193,10 +281,11 @@ void setup() {
 }
 
 void loop() {
-  idleWithAnimationAndAutoMatch();
+  idleWithAnimationAndAutoMatch();  // cada frame, sin delays largos
 
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n'); line.trim();
     if (line.length()) handleSerialCommand(line);
   }
 }
+
