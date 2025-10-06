@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../Proyectos/ESP32/huella"
+		},
+		{
+			"name": "HuellaDactilar",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}

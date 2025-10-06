@@ -1,117 +1,185 @@
 #include "DisplayModel.h"
-#include <Wire.h>
 #include "Bitmaps.h"
 
-DisplayModel::DisplayModel(TwoWire *wire, int xoffset)
-: _display(SCREEN_W, SCREEN_H, wire, -1), _xoff(xoffset) {}
-
-bool DisplayModel::begin() {
-  if (!_display.begin(0x3C, true)) return false;
-  _display.clearDisplay(); _display.display();
-  idle();
-  return true;
-}
-
-void DisplayModel::clear() { _display.clearDisplay(); }
-void DisplayModel::show()  { _display.display(); }
-
-void DisplayModel::drawFp64Right() {
-  const int x = 64 + _xoff;  // mitad derecha
-  const int y = 0;
+// ===== helper con (w, h) — debe ir ANTES de usarlo =====
+static inline void drawBitmapAny(Adafruit_SH1106G& disp, int x, int y, const uint8_t* img, int w, int h) {
 #if FP_BITMAP_IS_XBM
-  _display.drawXBitmap(x, y, FP_64x64, FP64_W, FP64_H, 1);
+  disp.drawXBitmap(x, y, img, w, h, 1);                 // XBM no tiene bg
 #else
-  _display.drawBitmap (x, y, FP_64x64, FP64_W, FP64_H, 1);
+  disp.drawBitmap (x, y, img, w, h, SH110X_WHITE, SH110X_BLACK);  // <-- color y fondo
 #endif
 }
 
-void DisplayModel::leftTwoLines(const String& l1, const String& l2) {
-  clear();
-  _display.setTextColor(SH110X_WHITE);
-  _display.setTextSize(1);
+Adafruit_SH1106G& DisplayModel::raw() { return _display; }
 
-  auto printLine = [&](const String& s, int y) {
-    int16_t x1,y1; uint16_t w,h;
-    _display.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
-    int x = max(0, (64 - (int)w)/2);
-    _display.setCursor(x, y);
-    _display.println(s);
+// ---------- init ----------
+bool DisplayModel::begin(uint8_t addr, bool reset) {
+  if (!_display.begin(addr, reset)) return false;
+  _display.clearDisplay();
+  _display.display();
+  return true;
+}
+
+
+// ---------- dibujos ----------
+void DisplayModel::drawFp64Right() {
+  const int x = 64 + _xoff;
+  const int y = 0;
+  drawBitmapAny(_display, x, y, FP_64x64, FP64_W, FP64_H);
+}
+
+void DisplayModel::drawFpPhase(uint8_t phase) {
+  const int x = 64 + _xoff, y = 0;
+
+  // Secuencia de “respiración”: 25% → 1 → 50% → 75% → 100%
+  static const uint8_t* const FRAMES[] = {
+    FP_64x64_25,
+    FP_64x64_1,     // <- NUEVO frame intermedio
+    FP_64x64_50,
+    FP_64x64_75,
+    FP_64x64        // 100%
   };
+  constexpr uint8_t FRAME_COUNT = sizeof(FRAMES)/sizeof(FRAMES[0]);
 
-  printLine(l1, 10);
-  if (l2.length()) printLine(l2, 26);
+  if (phase >= FRAME_COUNT) phase = FRAME_COUNT - 1;
+  const uint8_t* img = FRAMES[phase];
 
-  drawFp64Right();
-  show();
+  
+#if FP_BITMAP_IS_XBM
+  _display.drawXBitmap(x, y, img, FP64_W, FP64_H, 1);
+#else
+  drawBitmapAny(_display, x, y, img, FP64_W, FP64_H);
+#endif
+  _display.display();
 }
 
-void DisplayModel::idle()     { leftTwoLines("Ponga su", "huella"); }
-void DisplayModel::scanning() { leftTwoLines("Escaneando", "mantener..."); _scanningActive = true;}
 
-void DisplayModel::okMsg(const String& l2) {
-  clear();
-  _display.setTextColor(SH110X_WHITE);
-  _display.setTextSize(2);
-  _display.setCursor(6, 4); _display.println("OK");
-  _display.setTextSize(1);
-  _display.setCursor(0, 28); _display.println(l2);
-  drawFp64Right();
-  show();
-  _scanningActive = false;
+void DisplayModel::drawOkRight() {
+  const int paneX = 64, paneY = 0;
+  _display.fillRect(paneX, paneY, 64, 64, SH110X_BLACK);
+#if FP_BITMAP_IS_XBM
+  _display.drawXBitmap(paneX, paneY, ICON_OK_64, ICON_W, ICON_H, 1);
+#else
+  _display.drawBitmap (paneX, paneY, ICON_OK_64, ICON_W, ICON_H, 1);
+#endif
+  _display.display();
 }
 
-void DisplayModel::errorMsg(const String& msg) {
-  clear();
+void DisplayModel::drawErrRight() {
+  const int paneX = 64, paneY = 0;
+  _display.fillRect(paneX, paneY, 64, 64, SH110X_BLACK);
+#if FP_BITMAP_IS_XBM
+  _display.drawXBitmap(paneX, paneY, ICON_ERR_64, ICON_W, ICON_H, 1);
+#else
+  _display.drawBitmap (paneX, paneY, ICON_ERR_64, ICON_W, ICON_H, 1);
+#endif
+  _display.display();
+}
+
+
+void DisplayModel::scanBlinkTick(bool on) {
+  // ON=100%, OFF=limpio (compat con código viejo)
+  const int x = 64 + _xoff, y = 0;
+  _display.fillRect(x, y, FP64_W, FP64_H, SH110X_BLACK);
+  if (on) drawBitmapAny(_display, x, y, FP_64x64, FP64_W, FP64_H);
+  _display.display();
+}
+
+// ---------- pantallas ----------
+void DisplayModel::idle() {
+  _display.clearDisplay();
   _display.setTextColor(SH110X_WHITE);
-  _display.setTextSize(2);
-  _display.setCursor(0, 4); _display.println("ERROR");
   _display.setTextSize(1);
-  _display.setCursor(0, 28); _display.println(msg);
+  _display.setCursor(0, 8);  _display.println("Ponga su");
+  _display.setCursor(0, 20); _display.println("huella");
   drawFp64Right();
-  show();
-  _scanningActive = false;
+  _display.display();
+}
+
+void DisplayModel::scanning() {
+  _display.clearDisplay();
+  _display.setTextColor(SH110X_WHITE);
+  _display.setTextSize(1);
+  _display.setCursor(0, 8);  _display.println("Escaneando...");
+  _display.setCursor(0, 20); _display.println("mantener");
+  _display.display();
 }
 
 void DisplayModel::welcome(const String& nombre, uint16_t id, int score) {
-  clear();
+  _display.clearDisplay();
   _display.setTextColor(SH110X_WHITE);
   _display.setTextSize(1);
-
   _display.setCursor(0, 0);  _display.println("Acceso concedido");
   _display.setTextSize(2);
   _display.setCursor(0, 16);
   if (nombre.length()) _display.println("Bienvenido");
   else                 _display.println("ID OK");
-
   _display.setTextSize(1);
   _display.setCursor(0, 36);
   if (nombre.length()) {
-    _display.print(nombre); _display.print(" (ID "); _display.print(id); _display.println(")");
+    _display.print(nombre);
+    _display.print(" (ID "); _display.print(id); _display.println(")");
   } else {
     _display.print("ID "); _display.println(id);
   }
   _display.setCursor(0, 48);
   _display.print("Score: "); _display.println(score);
 
-  drawFp64Right();
-  show();
-  _scanningActive = false;
-}
-
-void DisplayModel::scanBlinkTick(bool on) {
-  const int x = 64 + _xoff;
-  const int y = 0;
-
-  // Apagar exactamente el área del ícono
-  _display.fillRect(x, y, FP64_W, FP64_H, SH110X_BLACK);
-
-  // Encender si corresponde
-#if FP_BITMAP_IS_XBM
-  if (on) _display.drawXBitmap(x, y, FP_64x64, FP64_W, FP64_H, 1);
-#else
-  if (on) _display.drawBitmap (x, y, FP_64x64, FP64_W, FP64_H, 1);
-#endif
-
+  // LIMPIEZA EXPLÍCITA DEL PANEL DERECHO + TILDE
+  _display.fillRect(64, 0, 64, 64, SH110X_BLACK);
+  drawOkRight();
   _display.display();
 }
 
+void DisplayModel::errorMsg(const String& msg) {
+  _display.clearDisplay();
+  _display.setTextColor(SH110X_WHITE);
+  _display.setTextSize(2);
+  _display.setCursor(6, 4); _display.println("ERROR");
+  _display.setTextSize(1);
+  _display.setCursor(0, 24); _display.println(msg);
+
+  // LIMPIEZA EXPLÍCITA DEL PANEL DERECHO + CRUZ
+  _display.fillRect(64, 0, 64, 64, SH110X_BLACK);
+  drawErrRight();
+  _display.display();
+}
+
+void DisplayModel::okMsg(const String& l2) {
+  _display.clearDisplay();
+  _display.setTextColor(SH110X_WHITE);
+  _display.setTextSize(2);
+  _display.setCursor(26, 4); _display.println("OK");
+  _display.setTextSize(1);
+  _display.setCursor(0, 24); _display.println(l2);
+  drawFp64Right();
+  _display.display();
+}
+
+void DisplayModel::drawFpPhaseLabeled(uint8_t phase, uint8_t label) {
+  const int x = 64 + _xoff, y = 0;
+  const uint8_t* img =
+      (phase >= 3) ? FP_64x64
+    : (phase == 2) ? FP_64x64_75
+    : (phase == 1) ? FP_64x64_50
+                   : FP_64x64_25;
+
+  // panel derecho
+  _display.fillRect(x, y, FP64_W, FP64_H, SH110X_BLACK);
+
+  // huella del frame
+  #if FP_BITMAP_IS_XBM
+    _display.drawXBitmap(x, y, img, FP64_W, FP64_H, 1);
+  #else
+    _display.drawBitmap (x, y, img, FP64_W, FP64_H, 1);
+  #endif
+
+  // badge con número (esquina sup-izquierda del panel)
+  _display.fillRect(x+2, y+2, 12, 10, SH110X_WHITE);
+  _display.setTextColor(SH110X_BLACK);
+  _display.setTextSize(1);
+  _display.setCursor(x+4, y+3);
+  _display.print(label);  // 1..4
+
+  _display.display();
+}

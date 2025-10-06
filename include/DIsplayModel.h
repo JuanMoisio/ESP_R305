@@ -1,34 +1,41 @@
 #pragma once
 #include <Arduino.h>
-#include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
 
 class DisplayModel {
 public:
-  static constexpr int SCREEN_W = 128;
-  static constexpr int SCREEN_H = 64;
-  void setScanningActive(bool on) { _scanningActive = on; }
-  bool isScanningActive() const { return _scanningActive; }
+  explicit DisplayModel(Adafruit_SH1106G& d, int xoff = 2) : _display(d), _xoff(xoff) {}
+  Adafruit_SH1106G& raw();  // acceso al objeto OLED
 
+  // Inicialización del OLED (wrapper conveniente)
+  bool begin(uint8_t addr = 0x3C, bool reset = true);
 
-  explicit DisplayModel(TwoWire *wire, int xoffset = 2);
-
-  bool begin();                    // inicia SH1106 (0x3C)
-  void idle();                     // "Ponga su" / "huella"
-  void scanning();                 // "Escaneando" / "mantener..."
-  void okMsg(const String& l2="Lectura correcta");
-  void errorMsg(const String& msg);
+  // Pantallas básicas (podés ajustar los textos a gusto)
+  void idle();
+  void scanning();
   void welcome(const String& nombre, uint16_t id, int score);
+  void errorMsg(const String& msg);
+  void okMsg(const String& l2 = "");
 
-  void scanBlinkTick(bool on);     // parpadeo icono durante captura
+  // Dibujo del ícono 64x64
+  void drawFp64Right();
+
+  // Animación por fases (0=25%, 1=50%, 2=75%, 3=100)
+  void drawFpPhase(uint8_t phase);
+  void drawFpPhaseLabeled(uint8_t phase, uint8_t label);
+
+  // Compatibilidad: si alguien aún llama a ON/OFF
+  void scanBlinkTick(bool on);
+
+  // Offset horizontal típico del SH1106
+  void setXOffset(int xo) { _xoff = xo; }
+  int  xoffset() const { return _xoff; }
+  void drawOkRight();
+  void drawErrRight();
 
 private:
-  void clear();
-  void show();
-  void leftTwoLines(const String& l1, const String& l2);
-  void drawFp64Right();
-   bool _scanningActive = false;
-
-  Adafruit_SH1106G _display;
+  Adafruit_SH1106G& _display;
   int _xoff;
 };
+
+  
