@@ -3,6 +3,8 @@
 #include "DisplayModel.h"
 #include "FingerprintModel.h"
 #include "NamesModel.h"
+#include "FingerprintApi.h"
+#include "ScanRequest.h"
 
 // ===== Configs que ya usabas =====
 #ifndef SCORE_MATCH
@@ -39,6 +41,11 @@ public:
 
   // Nuevo: ajustar tiempo mínimo visual de escaneo (ms)
   void setMinScanMs(unsigned long ms) { minScanMs = ms; }
+  // Nuevo: ajustar velocidad de la barra (ms entre pasos, pixeles por paso)
+  void setScanBarSpeed(unsigned long stepMs, int pixels) {
+    scanBarStepMs = stepMs;
+    scanBarStepPixels = max(1, pixels);
+  }
 
   // Llamar en loop() muy seguido
   void tick() {
@@ -52,11 +59,12 @@ public:
           uiDrawn = AutoState::WAIT_FINGER;
         }
 
-        // Dedo presente -> entrar a MATCHING y arrancar animación YA
-        if (finger.chip().getImage() != FINGERPRINT_NOFINGER) {
+        // Si hubo una petición externa de escaneo, arrancar MATCHING
+        if (consumeScanRequest()) {
           display.scanning();
           uiDrawn = AutoState::MATCHING;
 
+          // iniciar animación y estado MATCHING
           phase = 0; phaseDir = +1;
           nextPhaseAt = now;               // primer frame inmediato
           display.drawFpPhase(phase);      // dibuja el 1er fotograma YA
@@ -73,7 +81,7 @@ public:
             AutoMode* self = static_cast<AutoMode*>(arg);
             self->runMatchTask();
             vTaskDelete(nullptr);
-          }, "fingerMatch", 4096, this, 1, nullptr, 0);
+          }, "fingerMatch", 8192, this, 1, nullptr, 0);
 
           // reset scan bar
           scanBarY = FP_Y;
@@ -134,8 +142,10 @@ public:
           resultId     = resultOk ? id : -1;
           resultScore  = score;
           resultReady  = true;
-          // usar minScanMs configurable
           showResultAt = max(now, scanStart + minScanMs);
+
+          // emitir resultado vía SSE para otras apps
+          fpApiEmitResult(resultOk, resultId, resultScore);
 
           job.done   = false;
           job.active = false;
@@ -210,7 +220,9 @@ private:
   int scanBarY = FP_Y;
   int scanBarDir = +1;
   unsigned long scanBarNextAt = 0;
-  static constexpr unsigned long SCANBAR_STEP_MS = 24; // velocidad de la barra
+  // velocidad configurable: ms entre pasos y pixeles por paso
+  unsigned long scanBarStepMs = 24; // menor = más rápido
+  int scanBarStepPixels = 1;        // píxeles que avanza cada paso
   static constexpr int SCANBAR_THICK = 4; // grosor en pixeles
   bool scanBarEnabled = true;
 
@@ -224,25 +236,25 @@ private:
     display.drawFpPhase(phase);
   }
 
-  // --- dibuja la barra de escaneo (se llama desde tick)
-  void drawScanBarIfNeeded(unsigned long now) {
-    if ((long)(now - scanBarNextAt) < 0) return;
-    scanBarNextAt = now + SCANBAR_STEP_MS;
+   // --- dibuja la barra de escaneo (se llama desde tick)
+   void drawScanBarIfNeeded(unsigned long now) {
+     if ((long)(now - scanBarNextAt) < 0) return;
+     scanBarNextAt = now + scanBarStepMs;
 
-    // avanzar posición
-    scanBarY += scanBarDir;
-    if (scanBarY > FP_Y + FP_H - SCANBAR_THICK) { scanBarY = FP_Y + FP_H - SCANBAR_THICK; scanBarDir = -1; }
-    if (scanBarY < FP_Y) { scanBarY = FP_Y; scanBarDir = +1; }
+     // avanzar posición (posible salto >1px para acelerar)
+     scanBarY += scanBarDir * scanBarStepPixels;
+     if (scanBarY > FP_Y + FP_H - SCANBAR_THICK) { scanBarY = FP_Y + FP_H - SCANBAR_THICK; scanBarDir = -1; }
+     if (scanBarY < FP_Y) { scanBarY = FP_Y; scanBarDir = +1; }
 
-    // redraw: limpiamos la región de la huella, pintamos la huella y luego la barra (overlay)
-    // así evitamos restos dejados por la barra anterior
-    auto& d = display.raw();
-    d.fillRect(FP_X, FP_Y, FP_W, FP_H, SH110X_BLACK); // <-- limpia área FP
-    display.drawFpPhase(phase);                         // pinta huella original
-    // barra horizontal blanca que cruza la imagen de la huella (en la mitad derecha)
-    d.fillRect(FP_X, scanBarY, FP_W, SCANBAR_THICK, SH110X_WHITE);
-    d.display();
-  }
+     // redraw: limpiamos la región de la huella, pintamos la huella y luego la barra (overlay)
+     // así evitamos restos dejados por la barra anterior
+     auto& d = display.raw();
+     d.fillRect(FP_X, FP_Y, FP_W, FP_H, SH110X_BLACK); // limpia área FP
+     display.drawFpPhase(phase);                        // pinta huella original
+     // barra horizontal blanca que cruza la imagen de la huella (en la mitad derecha)
+     d.fillRect(FP_X, scanBarY, FP_W, SCANBAR_THICK, SH110X_WHITE);
+     d.display();
+   }
 
   // --- tarea en background (bloqueante sin afectar UI)
   void runMatchTask() {
