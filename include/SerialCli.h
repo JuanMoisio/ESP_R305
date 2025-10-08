@@ -52,26 +52,9 @@ inline void handleSerialCommand(
   AutoMode& autoMode
 ) {
   if (line == "s") {
-    Serial.println(F("Apoyá el dedo..."));
-    display.scanning();
-
-    gBlinkDisp = &display;
-    MatchRes m = fpModel.fastMatch(&BlinkCbThunk);
-    gBlinkDisp = nullptr;
-
-    if (m.ok) {
-      String name = names.get(m.id);
-      display.welcome(name, m.id, m.score);
-      Serial.print(F("Match ID=")); Serial.print(m.id);
-      Serial.print(F(" score=")); Serial.println(m.score);
-      delay(1500);
-      display.idle();
-    } else {
-      display.errorMsg("Sin coincidencia");
-      Serial.println(F("No se encontró match"));
-      delay(900);
-      display.idle();
-    }
+    // solicitar scan (misma acción que API) -> comportamiento idéntico
+    Serial.println("Solicitud scan -> esperando dedo...");
+    requestScan(15000); // mismo comportamiento que el API
     return;
   }
 

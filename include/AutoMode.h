@@ -98,7 +98,7 @@ public:
           if (!waitingForFinger) {
             waitingForFinger = true;
             display.scanning();    // pantalla que indica "Ponga su huella"
-            Serial.printf("[AutoMode] requestScan received -> waitingForFinger at %lu\n", millis());
+            Serial.printf("[AutoMode] requestScan -> waitingForFinger at %lu\n", millis());
             uiDrawn = AutoState::MATCHING; // usamos MATCHING UI mientras esperamos el dedo
           }
 
@@ -138,6 +138,7 @@ public:
             waitingForFinger = false;
             drawWaitingCommand();
             uiDrawn = AutoState::WAIT_FINGER;
+            Serial.printf("[AutoMode] request cleared -> idle at %lu\n", millis());
           }
         }
         break;
