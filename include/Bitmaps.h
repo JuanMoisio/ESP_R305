@@ -25,6 +25,8 @@ extern const uint8_t FP_64x64_1[512]     PROGMEM;
 extern const uint8_t ICON_OK_64[512]  PROGMEM;  // tilde ✔  (64x64, 1bpp)
 extern const uint8_t ICON_ERR_64[512] PROGMEM;  // cruz ✖  (64x64, 1bpp)
 
+// nuevo: logo Permaquim 64x64 (512 bytes)
+extern const uint8_t ICON_PERMAQUIM_64[512] PROGMEM;
 
 // Compatibilidad con código viejo (OledUi.cpp, etc.)
 #define FP64 FP_64x64

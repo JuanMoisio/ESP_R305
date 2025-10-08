@@ -5,6 +5,7 @@
 #include "NamesModel.h"
 #include "FingerprintApi.h"
 #include "ScanRequest.h"
+#include "Bitmaps.h"
 
 // ===== Configs que ya usabas =====
 #ifndef SCORE_MATCH
@@ -30,7 +31,18 @@ public:
 
   // Llamar en setup()
   void begin() {
-    uiDrawn = AutoState::COOLDOWN;   // forzar primer draw de idle
+    // asegurar estado inicial: no esperar huella y mostrar idle
+    cancelScan();                     // limpiar cualquier petición previa
+    waitingForFinger = false;
+    state = AutoState::WAIT_FINGER;
+    uiDrawn = AutoState::WAIT_FINGER;
+
+    // nuevo: dibujar explícito "Waiting command"
+    drawWaitingCommand();
+
+    // debug: confirmar estado inicial de scan
+    Serial.printf("[AutoMode] begin() isScanRequested=%d at=%lu\n", isScanRequested() ? 1 : 0, millis());
+
     // inicializa barra de escaneo
     scanBarY = FP_Y;
     scanBarNextAt = millis();
@@ -51,44 +63,82 @@ public:
   void tick() {
     unsigned long now = millis();
 
+    // debug: detectar cambios de estado
+    if (state != prevState) {
+      Serial.printf("[AutoMode] state %d -> %d at %lu\n", (int)prevState, (int)state, now);
+      prevState = state;
+    }
+
+    // Si programamos un retorno forzado a idle, cumplirlo (por seguridad)
+    if (forcedReturnAt != 0 && (long)(now - forcedReturnAt) >= 0) {
+      Serial.printf("[AutoMode] forced return to idle at %lu\n", now);
+      forcedReturnAt = 0;
+      cancelScan();
+      waitingForFinger = false;
+      state = AutoState::WAIT_FINGER;
+      uiDrawn = AutoState::WAIT_FINGER;
+      display.idle();
+    }
+
     switch (state) {
       case AutoState::WAIT_FINGER: {
-        // Dibujo de idle una sola vez al entrar
-        if (uiDrawn != AutoState::WAIT_FINGER) {
-          display.idle();
-          uiDrawn = AutoState::WAIT_FINGER;
+        // Dibujar idle SOLO si NO hay petición de scan activa
+        if (!isScanRequested()) {
+          if (uiDrawn != AutoState::WAIT_FINGER) {
+            drawWaitingCommand();
+             uiDrawn = AutoState::WAIT_FINGER;
+             Serial.printf("[AutoMode] UI -> idle at %lu\n", millis());
+          }
         }
 
-        // Si hubo una petición externa de escaneo, arrancar MATCHING
-        if (consumeScanRequest()) {
-          display.scanning();
-          uiDrawn = AutoState::MATCHING;
+        // Si hubo petición externa (API/serial) entramos en "esperando dedo"
+        // y mantenemos esa pantalla hasta detectar el dedo o hasta cancelar/expirar.
+        if (isScanRequested()) {
+          // marcar que estamos en modo "esperando dedo" y mostrar instrucción sólo al entrar
+          if (!waitingForFinger) {
+            waitingForFinger = true;
+            display.scanning();    // pantalla que indica "Ponga su huella"
+            Serial.printf("[AutoMode] requestScan received -> waitingForFinger at %lu\n", millis());
+            uiDrawn = AutoState::MATCHING; // usamos MATCHING UI mientras esperamos el dedo
+          }
 
-          // iniciar animación y estado MATCHING
-          phase = 0; phaseDir = +1;
-          nextPhaseAt = now;               // primer frame inmediato
-          display.drawFpPhase(phase);      // dibuja el 1er fotograma YA
+          // Si detecta dedo => arrancar MATCHING (tarea background)
+          if (finger.chip().getImage() != FINGERPRINT_NOFINGER) {
+            // salir del modo "esperando dedo" porque ya apoyó el dedo
+            waitingForFinger = false;
+            Serial.printf("[AutoMode] dedo detectado -> start MATCHING at %lu\n", millis());
 
-          scanStart       = now;
-          matchingDeadline= now + 15000;
-          resultReady     = false;
+            // arrancamos animación y matching como antes
+            phase = 0; phaseDir = +1;
+            nextPhaseAt = now;
+            display.drawFpPhase(phase);
 
-          // armamos el job para que pueda correr cuando haya imagen OK
-          job.done = false;
-          job.active = true; // marcar activo porque lanzamos la tarea ahora
-          // lanzar tarea en core 0 para no trabar loop/UI
-          xTaskCreatePinnedToCore(+[](void* arg){
-            AutoMode* self = static_cast<AutoMode*>(arg);
-            self->runMatchTask();
-            vTaskDelete(nullptr);
-          }, "fingerMatch", 8192, this, 1, nullptr, 0);
+            scanStart       = now;
+            matchingDeadline= now + 15000;
+            resultReady     = false;
 
-          // reset scan bar
-          scanBarY = FP_Y;
-          scanBarDir = +1;
-          scanBarNextAt = now;
+            job.done = false;
+            job.active = true;
+            xTaskCreatePinnedToCore(+[](void* arg){
+              AutoMode* self = static_cast<AutoMode*>(arg);
+              self->runMatchTask();
+              vTaskDelete(nullptr);
+            }, "fingerMatch", 8192, this, 1, nullptr, 0);
 
-          state = AutoState::MATCHING;
+            // reset scan bar
+            scanBarY = FP_Y;
+            scanBarDir = +1;
+            scanBarNextAt = now;
+
+            state = AutoState::MATCHING;
+          }
+        } else {
+          // no hay petición: si veníamos en "esperando dedo" la limpiamos y volvemos a idle
+          if (waitingForFinger) {
+            waitingForFinger = false;
+            drawWaitingCommand();
+            uiDrawn = AutoState::WAIT_FINGER;
+          }
         }
         break;
       }
@@ -113,6 +163,14 @@ public:
             } else {
               display.errorMsg("Sin coincidencia");
             }
+            Serial.printf("[AutoMode] result shown ok=%d id=%d score=%d at %lu\n", resultOk, resultId, resultScore, millis());
+
+            // Asegurar que cancelamos cualquier petición de escaneo y salimos del modo "esperando dedo"
+            cancelScan();
+            waitingForFinger = false;
+           // programar un retorno forzado a idle tras RESULT_MS por si algo re-habilita el modo
+           forcedReturnAt = millis() + RESULT_MS;
+
             cooldownUntil = now + RESULT_MS;
             state  = AutoState::COOLDOWN;
             uiDrawn= AutoState::COOLDOWN;
@@ -123,6 +181,7 @@ public:
         // 3) Timeout duro
         if ((long)(now - matchingDeadline) >= 0) {
           display.errorMsg("Tiempo agotado");
+          Serial.printf("[AutoMode] matching timeout -> enter cooldown at %lu\n", millis());
           cooldownUntil = now + RESULT_MS;
           state  = AutoState::COOLDOWN;
           uiDrawn= AutoState::COOLDOWN;
@@ -144,11 +203,12 @@ public:
           resultReady  = true;
           showResultAt = max(now, scanStart + minScanMs);
 
-          // emitir resultado vía SSE para otras apps
-          fpApiEmitResult(resultOk, resultId, resultScore);
-
           job.done   = false;
           job.active = false;
+
+         // Al finalizar el intento limpiamos la petición de scan (si estaba activa)
+         cancelScan();
+
         }
         break;
       }
@@ -157,6 +217,13 @@ public:
         // Nada que pintar; sólo esperar
         if ((long)(now - cooldownUntil) >= 0) {
           state = AutoState::WAIT_FINGER;
+          // asegurar que la UI vuelva a idle inmediatamente
+          uiDrawn = AutoState::WAIT_FINGER;
+          waitingForFinger = false;
+          // también cancelar petición por si quedó en cola desde otro lado
+          cancelScan();
+          forcedReturnAt = 0;
+          drawWaitingCommand();
         }
         break;
       }
@@ -182,10 +249,97 @@ private:
   FingerprintModel& finger;
   NamesModel&       names;
 
+  // helper: dibuja "Waiting command" limpiando todo el buffer
+  void drawWaitingCommand() {
+    auto& d = display.raw();
+    d.clearDisplay();
+
+    // offset horizontal (desplazar 32 píxeles a la derecha)
+    const int xOffset = 32;
+    const int yOffset = 0;
+
+    // debug: leer primeros bytes del bitmap para comprobar que existe en PROGMEM
+    uint8_t first = pgm_read_byte_near(ICON_PERMAQUIM_64);
+    Serial.printf("[AutoMode] ICON_PERMAQUIM_64 first=0x%02x\n", first);
+
+    // contar píxeles para detectar formato
+    auto countPixels = [&](bool msbFirst)->int {
+      int count = 0;
+      for (int y = 0; y < ICON_H; ++y) {
+        for (int x = 0; x < ICON_W; ++x) {
+          int bitIndex = y * ICON_W + x;
+          int byteIndex = bitIndex >> 3;
+          int bitPos = bitIndex & 7;
+          uint8_t b = pgm_read_byte_near(ICON_PERMAQUIM_64 + byteIndex);
+          bool on = msbFirst ? ((b >> (7 - bitPos)) & 1) : ((b >> bitPos) & 1);
+          if (on) ++count;
+        }
+      }
+      return count;
+    };
+
+    int msbCount = countPixels(true);
+    int lsbCount = countPixels(false);
+    Serial.printf("[AutoMode] pixelCounts msb=%d lsb=%d\n", msbCount, lsbCount);
+
+    if (msbCount == 0 && lsbCount == 0) {
+      // fallback texto centrado
+      d.setTextSize(1);
+      d.setTextColor(SH110X_WHITE);
+      d.setCursor(0, 28);
+      d.print("Waiting command");
+      d.display();
+      return;
+    }
+
+    bool useMsb = msbCount >= lsbCount;
+
+  #if FP_BITMAP_IS_XBM
+    if (useMsb) {
+      d.drawXBitmap(xOffset, yOffset, ICON_PERMAQUIM_64, ICON_W, ICON_H, SH110X_WHITE);
+    } else {
+      // dibujado manual LSB
+      for (int y = 0; y < ICON_H; ++y) {
+        for (int x = 0; x < ICON_W; ++x) {
+          int bitIndex = y * ICON_W + x;
+          int byteIndex = bitIndex >> 3;
+          int bitPos = bitIndex & 7;
+          uint8_t b = pgm_read_byte_near(ICON_PERMAQUIM_64 + byteIndex);
+          bool on = ((b >> bitPos) & 1);
+          if (on) d.drawPixel(x + xOffset, y + yOffset, SH110X_WHITE);
+        }
+      }
+    }
+  #else
+    if (!useMsb) {
+      d.drawBitmap(xOffset, yOffset, ICON_PERMAQUIM_64, ICON_W, ICON_H, SH110X_WHITE);
+    } else {
+      // dibujado manual MSB
+      for (int y = 0; y < ICON_H; ++y) {
+        for (int x = 0; x < ICON_W; ++x) {
+          int bitIndex = y * ICON_W + x;
+          int byteIndex = bitIndex >> 3;
+          int bitPos = bitIndex & 7;
+          uint8_t b = pgm_read_byte_near(ICON_PERMAQUIM_64 + byteIndex);
+          bool on = ((b >> (7 - bitPos)) & 1);
+          if (on) d.drawPixel(x + xOffset, y + yOffset, SH110X_WHITE);
+        }
+      }
+    }
+  #endif
+
+    d.display();
+  }
+
   // ===== estado UI
   AutoState state   = AutoState::WAIT_FINGER;
   AutoState uiDrawn = AutoState::COOLDOWN;
+  bool waitingForFinger = false; // true mientras se espera que el usuario apoye el dedo tras requestScan()
 
+  // debug / forzar retorno a idle
+  AutoState prevState = AutoState::WAIT_FINGER;
+  unsigned long forcedReturnAt = 0;
+  
   // ===== animación
   uint8_t  phase    = 0;   // 0..3 (25/50/75/100)
   int8_t   phaseDir = +1;

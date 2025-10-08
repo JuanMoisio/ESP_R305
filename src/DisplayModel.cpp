@@ -87,13 +87,15 @@ void DisplayModel::scanBlinkTick(bool on) {
 
 // ---------- pantallas ----------
 void DisplayModel::idle() {
-  _display.clearDisplay();
-  _display.setTextColor(SH110X_WHITE);
-  _display.setTextSize(1);
-  _display.setCursor(0, 8);  _display.println("Ponga su");
-  _display.setCursor(0, 20); _display.println("huella");
-  drawFp64Right();
-  _display.display();
+  // nuevo: dibujar logo en idle (ICON_PERMAQUIM_64 debe estar definido en Bitmaps.cpp)
+  auto& d = raw();
+  d.clearDisplay();
+  #if FP_BITMAP_IS_XBM
+    d.drawXBitmap(32, 0, ICON_PERMAQUIM_64, ICON_W, ICON_H, SH110X_WHITE);
+  #else
+    d.drawBitmap(32, 0, ICON_PERMAQUIM_64, ICON_W, ICON_H, SH110X_WHITE);
+  #endif
+  d.display();
 }
 
 void DisplayModel::scanning() {

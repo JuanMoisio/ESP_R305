@@ -107,18 +107,6 @@ void setup() {
 
   autoMode.begin();
   printHelp();
-
-  // Mostrar indicador en pantalla: "Waiting command" y quedar en standby para comandos
-  {
-    auto& oled = displayModel.raw();
-    oled.clearDisplay();
-    oled.setTextSize(1);
-    oled.setTextColor(SH110X_WHITE);
-    // posicion aproximada centrada verticalmente
-    oled.setCursor(0, 28);
-    oled.print("Waiting command");
-    oled.display();
-  }
 }
 
 // ===== Loop =====
@@ -144,4 +132,6 @@ void loop() {
     }
   }
   fpApiLoop(); // procesar y enviar eventos pendientes
+
+  // NO dibujar nada aquí: AutoMode gestiona la UI (idle/scanning/matching)
 }
