@@ -7,27 +7,20 @@
 #include "ScanRequest.h"
 #include "Bitmaps.h"
 
-// ===== Configs que ya usabas =====
-#ifndef SCORE_MATCH
-#define SCORE_MATCH 90
-#endif
-
-// ===== Estados =====
 enum class AutoState { WAIT_FINGER, MATCHING, COOLDOWN };
 
-// ===== Job FreeRTOS para el match =====
 struct MatchJob {
-  volatile bool active = false;
-  volatile bool done   = false;
-  bool ok = false;
-  int  id = -1;
-  int  score = 0;
+  bool active = false;
+  bool done   = false;
+  bool ok     = false;
+  int  id     = -1;
+  int  score  = 0;
 };
 
 class AutoMode {
 public:
-  AutoMode(DisplayModel& dm, FingerprintModel& fm, NamesModel& nm)
-  : display(dm), finger(fm), names(nm) {}
+  AutoMode(DisplayModel& d, FingerprintModel& f, NamesModel& n) 
+    : display(d), finger(f), names(n) {}
 
   // Llamar en setup()
   void begin() {
@@ -48,17 +41,6 @@ public:
     scanBarNextAt = millis();
   }
 
-  // Habilitar/deshabilitar la barra de escaneo
-  void setScanBarEnabled(bool en) { scanBarEnabled = en; }
-
-  // Nuevo: ajustar tiempo mínimo visual de escaneo (ms)
-  void setMinScanMs(unsigned long ms) { minScanMs = ms; }
-  // Nuevo: ajustar velocidad de la barra (ms entre pasos, pixeles por paso)
-  void setScanBarSpeed(unsigned long stepMs, int pixels) {
-    scanBarStepMs = stepMs;
-    scanBarStepPixels = max(1, pixels);
-  }
-
   // Llamar en loop() muy seguido
   void tick() {
     unsigned long now = millis();
@@ -77,7 +59,7 @@ public:
       waitingForFinger = false;
       state = AutoState::WAIT_FINGER;
       uiDrawn = AutoState::WAIT_FINGER;
-      display.idle();
+      drawWaitingCommand();
     }
 
     switch (state) {
@@ -86,8 +68,8 @@ public:
         if (!isScanRequested()) {
           if (uiDrawn != AutoState::WAIT_FINGER) {
             drawWaitingCommand();
-             uiDrawn = AutoState::WAIT_FINGER;
-             Serial.printf("[AutoMode] UI -> idle at %lu\n", millis());
+            uiDrawn = AutoState::WAIT_FINGER;
+            Serial.printf("[AutoMode] UI -> idle at %lu\n", millis());
           }
         }
 
@@ -145,32 +127,36 @@ public:
       }
 
       case AutoState::MATCHING: {
-        // 1) Animación "breathe" sin bloquear
-        if ((long)(now - nextPhaseAt) >= 0) {
-          stepAnimation(now);
-        }
+        // 1) Avanzar animación si es momento
+        if ((long)(now - nextPhaseAt) >= 0) stepAnimation(now);
 
-        // Dibujo extra: barra de escaneo (overlay)
-        if (scanBarEnabled) {
-          drawScanBarIfNeeded(now);
-        }
+        // 1b) Dibujar scan-bar si está habilitada
+        if (scanBarEnabled) drawScanBarIfNeeded(now);
 
         // 2) ¿Llegó resultado? (y ya pasó el mínimo)
         if (resultReady) {
           if ((long)(now - showResultAt) >= 0) {
             if (resultOk) {
-              String name = names.get(resultId);
-              display.welcome(name, resultId, resultScore);
+              // mostrar sólo icono de OK centrado (sin nombre/texto)
+              showCenteredIcon(ICON_OK_64);
+              // opcional: imprimir info por serial para debug
+              const int slotsPerUser = 5;
+              int userId = (resultId >= 0) ? (resultId / slotsPerUser) : -1;
+              String name = names.get(userId);
+              Serial.printf("Match OK: user=%d name='%s' score=%d\n", userId, name.c_str(), resultScore);
             } else {
-              display.errorMsg("Sin coincidencia");
+              // mostrar sólo icono de ERROR centrado
+              showCenteredIcon(ICON_ERR_64);
+              Serial.println("Match FAIL: sin coincidencia");
             }
             Serial.printf("[AutoMode] result shown ok=%d id=%d score=%d at %lu\n", resultOk, resultId, resultScore, millis());
 
             // Asegurar que cancelamos cualquier petición de escaneo y salimos del modo "esperando dedo"
             cancelScan();
             waitingForFinger = false;
-           // programar un retorno forzado a idle tras RESULT_MS por si algo re-habilita el modo
-           forcedReturnAt = millis() + RESULT_MS;
+
+            // programar un retorno forzado a idle tras RESULT_MS por si algo re-habilita el modo
+            forcedReturnAt = millis() + RESULT_MS;
 
             cooldownUntil = now + RESULT_MS;
             state  = AutoState::COOLDOWN;
@@ -179,37 +165,30 @@ public:
           break;
         }
 
-        // 3) Timeout duro
+        // 3) ¿Job en background ya terminó? Setear resultado y marcar tiempo de show
+        if (job.active && job.done) {
+          job.active = false;
+          resultOk    = job.ok;
+          resultId    = job.id;
+          resultScore = job.score;
+          resultReady = true;
+          // asegurar que ha pasado el mínimo de tiempo de escaneo visual
+          unsigned long elapsed = now - scanStart;
+          if (elapsed >= minScanMs) {
+            showResultAt = now; // mostrar inmediatamente
+          } else {
+            showResultAt = scanStart + minScanMs; // esperar al mínimo
+          }
+          break;
+        }
+
+        // 4) ¿Timeout global?
         if ((long)(now - matchingDeadline) >= 0) {
           display.errorMsg("Tiempo agotado");
           Serial.printf("[AutoMode] matching timeout -> enter cooldown at %lu\n", millis());
           cooldownUntil = now + RESULT_MS;
-          state  = AutoState::COOLDOWN;
-          uiDrawn= AutoState::COOLDOWN;
-          break;
-        }
-
-        // Nota: la captura y el matching se hacen en background (runMatchTask).
-        // No se llama a getImage() aquí para no bloquear la UI.
-
-        // 5) ¿job listo? Copio resultado y programo el momento de mostrar
-        if (job.done && !resultReady) {
-          bool ok    = job.ok;
-          int  id    = job.id;
-          int  score = job.score;
-
-          resultOk     = ok && (score > SCORE_MATCH);
-          resultId     = resultOk ? id : -1;
-          resultScore  = score;
-          resultReady  = true;
-          showResultAt = max(now, scanStart + minScanMs);
-
-          job.done   = false;
-          job.active = false;
-
-         // Al finalizar el intento limpiamos la petición de scan (si estaba activa)
-         cancelScan();
-
+          state = AutoState::COOLDOWN;
+          uiDrawn = AutoState::COOLDOWN;
         }
         break;
       }
@@ -231,26 +210,13 @@ public:
     }
   }
 
-  // Helpers para pruebas desde serie
-  void showOkTest()  { display.welcome("TEST", 1, 99);   enterCooldown(); }
-  void showErrTest() { display.errorMsg("Prueba error"); enterCooldown(); }
-  void showPanelTest() {
-    auto& d = display.raw();
-    d.clearDisplay();
-    d.display();
-    d.fillRect(64, 0, 64, 64, SH110X_BLACK);
-    d.drawRect(64, 0, 64, 64, SH110X_WHITE);
-    d.display();
-    cooldownUntil = millis() + RESULT_MS;
-  }
-
 private:
   // ===== modelos
   DisplayModel&     display;
   FingerprintModel& finger;
   NamesModel&       names;
 
-  // helper: dibuja "Waiting command" limpiando todo el buffer
+  // helper: dibuja logo en idle
   void drawWaitingCommand() {
     auto& d = display.raw();
     d.clearDisplay();
@@ -332,6 +298,20 @@ private:
     d.display();
   }
 
+  // helper: mostrar icono centrado sin texto
+  void showCenteredIcon(const uint8_t* icon) {
+    auto& d = display.raw();
+    d.clearDisplay();
+    const int xOffset = 32; // desplazar 32 píxeles a la derecha  
+    const int yOffset = 0;
+  #if FP_BITMAP_IS_XBM
+    d.drawXBitmap(xOffset, yOffset, icon, ICON_W, ICON_H, SH110X_WHITE);
+  #else
+    d.drawBitmap(xOffset, yOffset, icon, ICON_W, ICON_H, SH110X_WHITE);
+  #endif
+    d.display();
+  }
+
   // ===== estado UI
   AutoState state   = AutoState::WAIT_FINGER;
   AutoState uiDrawn = AutoState::COOLDOWN;
@@ -348,7 +328,7 @@ private:
   static constexpr unsigned long PHASE_MS     = 150;   // más chico = más rápido
   static constexpr unsigned long RESULT_MS    = 1500; // tiempo que se ve el resultado
   // MIN_SCAN_MS ahora configurable en runtime:
-  unsigned long minScanMs = 3900;  // “mínimo escaneo” visual (ms)
+  unsigned long minScanMs = 3900;  // "mínimo escaneo" visual (ms)
 
   // ===== timers
   unsigned long scanStart        = 0;
@@ -429,11 +409,5 @@ private:
     job.score= ok ? score : 0;
     job.done = true;
     // job.active se limpia en el thread que lanzó la tarea cuando procese el resultado
-  }
-
-  void enterCooldown() {
-    cooldownUntil = millis() + RESULT_MS;
-    state   = AutoState::COOLDOWN;
-    uiDrawn = AutoState::COOLDOWN;
   }
 };

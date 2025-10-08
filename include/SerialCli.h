@@ -5,11 +5,29 @@
 #include "FingerprintModel.h"
 #include "NamesModel.h"
 
+#ifndef MAX_ENROLL_ATTEMPTS
+  #define MAX_ENROLL_ATTEMPTS 5
+#endif
+
 
 namespace {
   static DisplayModel* gBlinkDisp = nullptr;
   static void BlinkCbThunk(bool on) {
     if (gBlinkDisp) gBlinkDisp->scanBlinkTick(on);
+  }
+
+  // Mostrar un icono 64x64 centrado en pantalla (desplazado 32px a la derecha)
+  static void showCenteredIcon(DisplayModel& display, const uint8_t* icon) {
+    auto& d = display.raw();
+    d.clearDisplay();
+    const int xOffset = 32; // desplazar 32 píxeles a la derecha
+    const int yOffset = 0;
+  #if FP_BITMAP_IS_XBM
+    d.drawXBitmap(xOffset, yOffset, icon, ICON_W, ICON_H, SH110X_WHITE);
+  #else
+    d.drawBitmap(xOffset, yOffset, icon, ICON_W, ICON_H, SH110X_WHITE);
+  #endif
+    d.display();
   }
 }
 
@@ -33,6 +51,7 @@ static inline void printHelp() {
   Serial.println();
   Serial.println(F("Comandos:"));
   Serial.println(F("  e <id>           Enrolar en ID (0..999)"));
+  Serial.println(F("    (nuevo) guarda 5 posiciones por ID: center, top, bottom, left, right"));
   Serial.println(F("  s                Match 1:N manual"));
   Serial.println(F("  d <id>           Borrar ID"));
   Serial.println(F("  c                Contar plantillas"));
@@ -100,14 +119,68 @@ inline void handleSerialCommand(
 
   if (line.startsWith("e ")) {
     uint16_t id = line.substring(2).toInt();
+    // Nuevo enrol multi-posiciones (5 imágenes): center, top, bottom, left, right
     Serial.print("Enrolando ID "); Serial.println(id);
 
-    display.scanning();
-    gBlinkDisp = &display;
-    bool okEnroll = fpModel.enroll(id, &BlinkCbThunk);
+    // comprobar capacidad
+    if (fpModel.chip().getParameters() != FINGERPRINT_OK) {
+      Serial.println("Error leyendo parámetros del sensor");
+      return;
+    }
+    const int capacity = fpModel.chip().capacity;
+    const int neededSlots = 5;
+    const long baseSlot = (long)id * neededSlots;
+    if (baseSlot + (neededSlots - 1) >= capacity) {
+      Serial.printf("No hay espacio: capacity=%d, id*%d+4=%ld\n", capacity, neededSlots, baseSlot + 4);
+      Serial.println("El ID supera la capacidad disponible para 5-templates por usuario.");
+      return;
+    }
+
+    const char* posNames[5] = { "CENTER", "TOP", "BOTTOM", "LEFT", "RIGHT" };
+   bool allOk = true;
+   gBlinkDisp = &display;
+   const int maxAttempts = MAX_ENROLL_ATTEMPTS;
+   for (int p = 0; p < neededSlots; ++p) {
+     uint16_t slot = baseSlot + p;
+     Serial.printf("Coloque el dedo en posición %s -> guardando slot %u\n", posNames[p], slot);
+     int attempt = 0;
+     bool ok = false;
+     while (attempt < maxAttempts && !ok) {
+       ++attempt;
+       // mostrar en pantalla instrucción específica
+       display.scanning();
+       // opcional: mostrar texto de posición (sin mostrar intentos)
+       {
+         auto& d = display.raw();
+         d.setTextSize(1);
+         d.setTextColor(SH110X_WHITE);
+         d.setCursor(0, 0);
+         d.print(posNames[p]);
+         d.display();
+       }
+       // intentar enroll en este slot
+       ok = fpModel.enroll(slot, &BlinkCbThunk);
+       if (!ok) {
+         Serial.printf("Intento %d falló en slot %u (pos %s)\n", attempt, slot, posNames[p]);
+         // mostrar sólo icono de error centrado
+         showCenteredIcon(display, ICON_ERR_64);
+         delay(700);
+       } else {
+         Serial.printf("Slot %u guardado correctamente (pos %s)\n", slot, posNames[p]);
+       }
+       delay(200);
+     }
+     if (!ok) {
+       Serial.printf("Enrolamiento falló en slot %u tras %d intentos (pos %s)\n", slot, maxAttempts, posNames[p]);
+       allOk = false;
+       break; // no reiniciamos posiciones previas, sólo abortamos el flujo
+     }
+     delay(300); // pequeño reposo entre posiciones exitosas
+   }
     gBlinkDisp = nullptr;
 
-    if (okEnroll) {
+    if (allOk) {
+      // pedir nombre
       Serial.print("Ingresá nombre para ID "); Serial.print(id); Serial.println(": ");
       String name = ""; unsigned long t0 = millis();
       while (millis() - t0 < 30000) {
@@ -122,19 +195,30 @@ inline void handleSerialCommand(
       name.trim();
       if (name.length()) { names.set(id, name); Serial.println("Nombre guardado."); }
       else Serial.println("Sin nombre (timeout).");
-      display.okMsg(String("ID ") + id);
+      showCenteredIcon(display, ICON_OK_64);
+      delay(1200);
     } else {
-      display.errorMsg("Enrolamiento falló");
-      Serial.println("Enrolamiento falló.");
+      showCenteredIcon(display, ICON_ERR_64);
+      delay(1200);
+      Serial.println("Enrolamiento falló. Puedes reintentar el enrolamiento para este ID.");
     }
+    // volver a idle (AutoMode gestionará el redraw si corresponde)
     display.idle();
     return;
   }
 
   // Tests UI opcionales (si los usás)
-  if (line == "ok")   { display.welcome("TEST", 123, 99); delay(1500); display.idle(); return; }
-  if (line == "err")  { display.errorMsg("Prueba error"); delay(1500); display.idle(); return; }
-  if (line == "panel"){ autoMode.showPanelTest(); return; }
+  if (line == "ok")   { showCenteredIcon(display, ICON_OK_64); delay(1500); display.idle(); return; }
+  if (line == "err")  { showCenteredIcon(display, ICON_ERR_64); delay(1500); display.idle(); return; }
+  if (line == "panel"){ 
+    Serial.println("Panel test - showing icons:");
+    showCenteredIcon(display, ICON_OK_64); 
+    delay(1500);
+    showCenteredIcon(display, ICON_ERR_64);
+    delay(1500);
+    display.idle();
+    return; 
+  }
 
   Serial.println("Comando no reconocido.");
   Serial.println(F("  e <id> | s | d <id> | c | x | i | n <id> <nombre>"));
